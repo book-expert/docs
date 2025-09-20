@@ -56,20 +56,9 @@ This pattern keeps the messaging layer fast and efficient while allowing for the
 -   **Action:**
     1.  Extracts the `TextKey` from the event.
     2.  Downloads the text file from the `TEXT_FILES` object store.
-    3.  Generates an audio representation of the text using the `chatllm` binary.
-    4.  Optionally post-processes the audio (e.g., format conversion, chunking) using `sox`.
-    5.  Uploads the final audio segment to the `AUDIO_FILES` object store, receiving a unique `AudioKey`.
+    3.  Generates a raw PCM audio representation of the text using the `chatllm` binary.
+    4.  Uploads the final audio segment to the `AUDIO_FILES` object store, receiving a unique `AudioKey`.
 -   **Output:** Publishes an `AudioChunkCreatedEvent` (containing the `AudioKey`) to the `audio.chunk.created` subject.
-
-### 3.4. `pcm-to-wav-service`
-
--   **Input:** Consumes `AudioChunkCreatedEvent` messages from the `audio.chunk.created` subject on the `AUDIO_PROCESSING` stream.
--   **Action:**
-    1.  Extracts the `AudioKey` from the event.
-    2.  Downloads the PCM audio file from the `AUDIO_FILES` object store.
-    3.  Converts the PCM file to a WAV file using `sox`.
-    4.  Uploads the final WAV file to the `WAV_FILES` object store, receiving a unique `WavKey`.
--   **Output:** Publishes a `WavFileCreatedEvent` (containing the `WavKey`) to the `wav.created` subject.
 
 ## 4. Configuration & Event Reference
 
@@ -81,7 +70,6 @@ All events share a common `EventHeader`. The key data fields for each event are:
 -   `PNGCreatedEvent`: Contains `PNGKey` (string), `PageNumber` (int), `TotalPages` (int).
 -   `TextProcessedEvent`: Contains `TextKey` (string), `PNGKey` (string), `PageNumber` (int), `TotalPages` (int), and TTS parameters: `Voice` (string), `Seed` (int), `NGL` (int), `TopP` (float64), `RepetitionPenalty` (float64), `Temperature` (float64).
 -   `AudioChunkCreatedEvent`: Contains `AudioKey` (string), `PageNumber` (int), `TotalPages` (int).
--   `WavFileCreatedEvent`: Contains `WavKey` (string), `PageNumber` (int), `TotalPages` (int).
 
 ### 4.2. Configuration (`project.toml`)
 
@@ -113,12 +101,6 @@ tts_stream_name = "TTS_JOBS"
 tts_consumer_name = "tts-workers"
 audio_chunk_created_subject = "audio.chunk.created"
 audio_object_store_bucket = "AUDIO_FILES"
-
-# PCM to WAV Processing
-audio_processing_stream_name = "AUDIO_PROCESSING"
-audio_processing_consumer_name = "pcm-to-wav-workers"
-wav_created_subject = "wav.created"
-wav_object_store_bucket = "WAV_FILES"
 ```
 
 ### 4.3. NATS Server (`nats-server.service`)
