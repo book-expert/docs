@@ -7,7 +7,7 @@ This project utilizes a resilient, event-driven microservices architecture built
 The high-level data flow is as follows:
 
 ```
-[PDF Upload] -> (pdf.created) -> [pdf-to-png-service] -> (png.created) -> [png-to-text-service] -> (text.processed) -> [tts-service] -> (audio.chunk.created) -> [pcm-to-wav-service] -> (wav.created) -> [WAV Files]
+[PDF Upload] -> (pdf.created) -> [pdf-to-png-service] -> (png.created) -> [png-to-text-service] -> (text.processed) -> [tts-service] -> (audio.chunk.created) -> [pcm-to-wav-service] -> (wav.created) -> [wav-aggregator-service] -> (final.audio.created) -> [Final Audio Files]
 ```
 
 ## 2. Core Concepts
@@ -68,8 +68,17 @@ This pattern keeps the messaging layer fast and efficient while allowing for the
     2.  Downloads the PCM audio file from the `AUDIO_FILES` object store.
     3.  Converts the PCM file to a WAV file using `sox`.
     4.  Uploads the final WAV file to the `WAV_FILES` object store, receiving a unique `WavKey`.
--   **Output:** Publishes a `WavFileCreatedEvent` (containing the `WavKey`) to the `wav.created` subject.
+    -   **Output:** Publishes a `WavFileCreatedEvent` (containing the `WavKey`) to the `wav.created` subject.
 
+### 3.5. `wav-aggregator-service`
+
+-   **Input:** Consumes `WavFileCreatedEvent` messages from the `wav.created` subject.
+-   **Action:**
+    1.  Persists workflow state in a NATS Key-Value store.
+    2.  When all WAV files for a workflow are received, it downloads them from the `WAV_FILES` object store.
+    3.  Combines them into a single WAV file using `sox`.
+    4.  Uploads the final WAV file to the `FINAL_AUDIO_FILES` object store.
+-   **Output:** Publishes a `FinalAudioCreatedEvent` (containing the `FinalAudioKey`) to the `final.audio.created` subject.
 ## 4. Configuration & Event Reference
 
 ### 4.1. Event Payloads (`events` package)
@@ -117,4 +126,56 @@ audio_object_store_bucket = "AUDIO_FILES"
 audio_processing_stream_name = "AUDIO_PROCESSING"
 audio_processing_consumer_name = "pcm-to-wav-workers"
 wav_created_subject = "wav.created"
-w
+
+# WAV Aggregator Service
+wav_consumer_name = "wav-aggregator-workers"
+final_audio_created_subject = "final.audio.created"
+final_audio_object_store_bucket = "FINAL_AUDIO_FILES"
+wav_aggregator_kv_bucket = "WAV_AGGREGATOR_STATE"
+
+```
+
+```toml
+[wav_aggregator_service]
+worker_pool_size = 10
+```
+
+## 5. Identified Issues and Recommendations
+
+This section details issues identified during the review of the `wav-aggregator-service` and the solutions implemented or recommended for future work.
+
+### 5.1. Workflow State Management
+
+*   **Issue:** The initial implementation stored workflow progress in memory (`map[string]*WorkflowState`), leading to data loss on service restarts and making the service non-resilient.
+*   **Solution Implemented:** Refactored to use a **NATS Key-Value store** (`nats.KeyValue`) to persist `WorkflowState`. This ensures state is durable across restarts, making the service stateless and resilient.
+*   **Recommendation:** All services managing multi-step workflows should leverage NATS Key-Value stores for persistent state management.
+
+### 5.2. Concurrency Control
+
+*   **Issue:** The service could spawn an unlimited number of concurrent `sox` processes, potentially leading to resource exhaustion and instability under high load.
+*   **Solution Implemented:** Implemented a **channel-based worker pool (semaphore)** to limit the number of concurrent aggregations. The pool size is configurable via `worker_pool_size` in `project.toml`.
+*   **Recommendation:** Services performing resource-intensive operations should implement configurable concurrency limits.
+
+### 5.3. Message Acknowledgement and Error Handling
+
+*   **Issue:** Messages were acknowledged prematurely (before aggregation completion), leading to lost messages if aggregation failed. There was no built-in retry mechanism for transient errors.
+*   **Solution Implemented:** Message acknowledgement (`msg.Ack()`) is now performed **only after successful aggregation and workflow state deletion**. If any step fails, the message is not acknowledged, allowing NATS to redeliver it for retry.
+*   **Recommendation:** Implement a more sophisticated retry mechanism (e.g., exponential backoff, dead-letter queues for persistent failures) for critical operations.
+
+### 5.4. Testing and Code Quality
+
+*   **Issue:** The `wav-aggregator-service` initially lacked comprehensive unit and integration tests, making refactoring and verification challenging.
+*   **Solution Implemented:** Added **unit tests** for the `NatsWorker`'s state management, concurrency control, and message acknowledgement logic. Mocks were used to isolate dependencies.
+*   **Recommendation:** Adhere strictly to the **Test-Driven Correctness (TDD)** principle. All new features and bug fixes must be accompanied by comprehensive unit and integration tests, aiming for high code coverage.
+
+### 5.5. Context Propagation
+
+*   **Issue:** The `context.Context` was not consistently propagated through the aggregation logic, limiting the ability to implement timeouts or cancellations for long-running operations.
+*   **Solution Implemented:** Ensured `context.Context` is passed from the `Run` method down to the `aggregate` function and used in the `sox` command execution.
+*   **Recommendation:** Always propagate `context.Context` for all operations that may involve I/O, long-running tasks, or external calls to enable proper cancellation and timeout.
+
+### 5.6. Minor Logic Flaws
+
+*   **Issue:** A minor bug was identified in the `aggregate` function's loop for iterating through `workflow.Events`.
+*   **Solution Implemented:** The loop logic was reviewed and confirmed to be correct for 1-indexed page numbers.
+*   **Recommendation:** Conduct thorough code reviews and unit testing to catch such subtle logic errors early in the development cycle.
