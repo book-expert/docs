@@ -140,42 +140,22 @@ wav_aggregator_kv_bucket = "WAV_AGGREGATOR_STATE"
 worker_pool_size = 10
 ```
 
-## 5. Identified Issues and Recommendations
+## 5. Communication Patterns
 
-This section details issues identified during the review of the `wav-aggregator-service` and the solutions implemented or recommended for future work.
+The services in this project employ two primary NATS communication patterns, each suited for different use cases.
 
-### 5.1. Workflow State Management
+### 5.1. Durable, Queue-Based Consumers (Workers)
 
-*   **Issue:** The initial implementation stored workflow progress in memory (`map[string]*WorkflowState`), leading to data loss on service restarts and making the service non-resilient.
-*   **Solution Implemented:** Refactored to use a **NATS Key-Value store** (`nats.KeyValue`) to persist `WorkflowState`. This ensures state is durable across restarts, making the service stateless and resilient.
-*   **Recommendation:** All services managing multi-step workflows should leverage NATS Key-Value stores for persistent state management.
+This is the most common pattern, used for services that perform work that must be completed reliably, such as the `pdf-to-png-service`, `png-to-text-service`, `pcm-to-wav-service`, and `wav-aggregator-service`.
 
-### 5.2. Concurrency Control
+-   **Streams and Consumers:** These services use JetStream **streams** to persist messages and **durable consumers** to read from them. A durable consumer remembers its position in the stream, so if the service restarts, it can resume processing where it left off.
+-   **Queue Groups:** Consumers are configured as a **queue group**. This means that although there may be multiple instances of a service running (for scalability), only one instance in the group will receive and process a given message. This ensures that each job is processed exactly once by the group.
+-   **Acknowledgements:** Services use manual message acknowledgement (`msg.Ack()`). A message is only acknowledged after it has been successfully processed. If processing fails, the message is not acknowledged, and NATS will redeliver it for another attempt, providing at-least-once delivery semantics.
 
-*   **Issue:** The service could spawn an unlimited number of concurrent `sox` processes, potentially leading to resource exhaustion and instability under high load.
-*   **Solution Implemented:** Implemented a **channel-based worker pool (semaphore)** to limit the number of concurrent aggregations. The pool size is configurable via `worker_pool_size` in `project.toml`.
-*   **Recommendation:** Services performing resource-intensive operations should implement configurable concurrency limits.
+### 5.2. Simple Publish/Subscribe
 
-### 5.3. Message Acknowledgement and Error Handling
+This pattern is used for services that simply publish event notifications without needing the guarantees of durable, queue-based consumption. The `tts-service` is an example of this.
 
-*   **Issue:** Messages were acknowledged prematurely (before aggregation completion), leading to lost messages if aggregation failed. There was no built-in retry mechanism for transient errors.
-*   **Solution Implemented:** Message acknowledgement (`msg.Ack()`) is now performed **only after successful aggregation and workflow state deletion**. If any step fails, the message is not acknowledged, allowing NATS to redeliver it for retry.
-*   **Recommendation:** Implement a more sophisticated retry mechanism (e.g., exponential backoff, dead-letter queues for persistent failures) for critical operations.
-
-### 5.4. Testing and Code Quality
-
-*   **Issue:** The `wav-aggregator-service` initially lacked comprehensive unit and integration tests, making refactoring and verification challenging.
-*   **Solution Implemented:** Added **unit tests** for the `NatsWorker`'s state management, concurrency control, and message acknowledgement logic. Mocks were used to isolate dependencies.
-*   **Recommendation:** Adhere strictly to the **Test-Driven Correctness (TDD)** principle. All new features and bug fixes must be accompanied by comprehensive unit and integration tests, aiming for high code coverage.
-
-### 5.5. Context Propagation
-
-*   **Issue:** The `context.Context` was not consistently propagated through the aggregation logic, limiting the ability to implement timeouts or cancellations for long-running operations.
-*   **Solution Implemented:** Ensured `context.Context` is passed from the `Run` method down to the `aggregate` function and used in the `sox` command execution.
-*   **Recommendation:** Always propagate `context.Context` for all operations that may involve I/O, long-running tasks, or external calls to enable proper cancellation and timeout.
-
-### 5.6. Minor Logic Flaws
-
-*   **Issue:** A minor bug was identified in the `aggregate` function's loop for iterating through `workflow.Events`.
-*   **Solution Implemented:** The loop logic was reviewed and confirmed to be correct for 1-indexed page numbers.
-*   **Recommendation:** Conduct thorough code reviews and unit testing to catch such subtle logic errors early in the development cycle.
+-   **Publishers:** The service publishes a message to a specific subject.
+-   **Subscribers:** Any service interested in that event can subscribe to the subject. Unlike queue groups, if there are multiple subscribers to a subject, they will **all** receive the message.
+-   **No Durability (by default):** In this simple pattern, if a subscriber is not running when the message is published, it will not receive it. This is suitable for "fire-and-forget" notifications where guaranteed delivery is not a strict requirement for the publisher.
