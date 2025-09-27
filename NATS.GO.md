@@ -52,7 +52,7 @@ This pattern keeps the messaging layer fast and efficient while allowing for the
 
 ### 3.3. `tts-service`
 
--   **Input:** Consumes `TextProcessedEvent` messages from the `text.processed` subject on the `TTS_JOBS` stream.
+-   **Input:** Consumes `TextProcessedEvent` messages from the `text.processed` subject.
 -   **Action:**
     1.  Extracts the `TextKey` from the event.
     2.  Downloads the text file from the `TEXT_FILES` object store.
@@ -68,7 +68,7 @@ This pattern keeps the messaging layer fast and efficient while allowing for the
     2.  Downloads the PCM audio file from the `AUDIO_FILES` object store.
     3.  Converts the PCM file to a WAV file using `sox`.
     4.  Uploads the final WAV file to the `WAV_FILES` object store, receiving a unique `WavKey`.
-    -   **Output:** Publishes a `WavFileCreatedEvent` (containing the `WavKey`) to the `wav.created` subject.
+-   **Output:** Publishes a `WavFileCreatedEvent` (containing the `WavKey`) to the `wav.created` subject.
 
 ### 3.5. `wav-aggregator-service`
 
@@ -90,6 +90,7 @@ All events share a common `EventHeader`. The key data fields for each event are:
 -   `TextProcessedEvent`: Contains `TextKey` (string), `PNGKey` (string), `PageNumber` (int), `TotalPages` (int), and TTS parameters: `Voice` (string), `Seed` (int), `NGL` (int), `TopP` (float64), `RepetitionPenalty` (float64), `Temperature` (float64).
 -   `AudioChunkCreatedEvent`: Contains `AudioKey` (string), `PageNumber` (int), `TotalPages` (int).
 -   `WavFileCreatedEvent`: Contains `WavKey` (string), `PageNumber` (int), `TotalPages` (int).
+-   `FinalAudioCreatedEvent`: Contains `FinalAudioKey` (string).
 
 ### 4.2. Configuration (`project.toml`)
 
@@ -111,21 +112,26 @@ png_consumer_name = "png-text-workers"
 png_created_subject = "png.created"
 png_object_store_bucket = "PNG_FILES"
 
-# Text Processing
-text_stream_name = "TTS_JOBS"
+# PNG to Text Service
+png_stream_name = "PNG_PROCESSING"
+png_consumer_name = "png-text-workers"
+png_created_subject = "png.created"
+png_object_store_bucket = "PNG_FILES"
 text_object_store_bucket = "TEXT_FILES"
-text_processed_subject = "text.processed"
+dead_letter_subject = "dead.letter"
+text_stream_name = "TTS_JOBS"
 
-# TTS Processing
-tts_stream_name = "TTS_JOBS"
+# Text to Speech Service
 tts_consumer_name = "tts-workers"
+text_processed_subject = "text.processed"
 audio_chunk_created_subject = "audio.chunk.created"
 audio_object_store_bucket = "AUDIO_FILES"
 
-# PCM to WAV Processing
+# PCM to WAV Service
 audio_processing_stream_name = "AUDIO_PROCESSING"
 audio_processing_consumer_name = "pcm-to-wav-workers"
 wav_created_subject = "wav.created"
+wav_object_store_bucket = "WAV_FILES"
 
 # WAV Aggregator Service
 wav_consumer_name = "wav-aggregator-workers"
@@ -146,7 +152,7 @@ The services in this project employ two primary NATS communication patterns, eac
 
 ### 5.1. Durable, Queue-Based Consumers (Workers)
 
-This is the most common pattern, used for services that perform work that must be completed reliably, such as the `pdf-to-png-service`, `png-to-text-service`, `pcm-to-wav-service`, and `wav-aggregator-service`.
+This is the most common pattern, used for services that perform work that must be completed reliably, such as the `pdf-to-png-service`, `png-to-text-service`, and `wav-aggregator-service`.
 
 -   **Streams and Consumers:** These services use JetStream **streams** to persist messages and **durable consumers** to read from them. A durable consumer remembers its position in the stream, so if the service restarts, it can resume processing where it left off.
 -   **Queue Groups:** Consumers are configured as a **queue group**. This means that although there may be multiple instances of a service running (for scalability), only one instance in the group will receive and process a given message. This ensures that each job is processed exactly once by the group.
@@ -154,8 +160,37 @@ This is the most common pattern, used for services that perform work that must b
 
 ### 5.2. Simple Publish/Subscribe
 
-This pattern is used for services that simply publish event notifications without needing the guarantees of durable, queue-based consumption. The `tts-service` is an example of this.
+This pattern is used for services that simply publish event notifications without needing the guarantees of durable, queue-based consumption. The `tts-service` and `pcm-to-wav-service` are examples of this.
 
 -   **Publishers:** The service publishes a message to a specific subject.
 -   **Subscribers:** Any service interested in that event can subscribe to the subject. Unlike queue groups, if there are multiple subscribers to a subject, they will **all** receive the message.
 -   **No Durability (by default):** In this simple pattern, if a subscriber is not running when the message is published, it will not receive it. This is suitable for "fire-and-forget" notifications where guaranteed delivery is not a strict requirement for the publisher.
+
+## 6. NATS Flow Diagram
+
+The following diagram illustrates the complete flow of events through the NATS system:
+
+```mermaid
+graph TD
+    A[PDF Upload] -->|pdf.created| B(pdf-to-png-service)
+    B -->|png.created| C(png-to-text-service)
+    C -->|text.processed| D[tts-service]
+    D -->|audio.chunk.created| E[pcm-to-wav-service]
+    E -->|wav.created| F[wav-aggregator-service]
+    F -->|final.audio.created| G[Final Audio Files]
+    
+    style A fill:#e1f5fe
+    style B fill:#f3e5f5
+    style C fill:#e8f5e8
+    style D fill:#fff3e0
+    style E fill:#fce4ec
+    style F fill:#f1f8e9
+    style G fill:#e0f2f1
+    
+    linkStyle 0 stroke:#1976d2
+    linkStyle 1 stroke:#7b1fa2
+    linkStyle 2 stroke:#388e3c
+    linkStyle 3 stroke:#f57c00
+    linkStyle 4 stroke:#c2185b
+    linkStyle 5 stroke:#689f38
+```
