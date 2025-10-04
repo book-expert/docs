@@ -162,7 +162,38 @@ type StreamConfig struct {
 
 **Usage:**
 
-Each service loads its NATS configuration into the `configurator.ServiceNATSConfig` struct. The `configurator` package also provides a set of helper functions to simplify the setup of NATS components, such as creating streams, consumers, and object stores.
+All services load NATS configuration into `configurator.ServiceNATSConfig` and use configurator helpers to create/update resources at startup. This ensures consistent topology and durable semantics across the fleet.
+
+Example TOML (per-service section):
+
+```toml
+[png-to-text-service.nats]
+url = "nats://127.0.0.1:4222"
+
+[[png-to-text-service.streams]]
+name = "tts-jobs"
+subjects = ["book-expert.texts.created"]
+
+[[png-to-text-service.consumers]]
+stream_name = "pngs"
+consumer_name = "png-to-text-consumer"
+filter_subject = "book-expert.pngs.created"
+
+[[png-to-text-service.object_stores]]
+bucket_name = "png-files"
+
+[[png-to-text-service.object_stores]]
+bucket_name = "text-files"
+```
+
+At runtime, services call:
+
+```go
+nc, js, err := configurator.SetupNATSComponents(cfg.ServiceNATS.NATS)
+_ = configurator.CreateOrUpdateStreams(ctx, js, cfg.ServiceNATS.Streams)
+_ = configurator.CreateOrUpdateConsumers(ctx, js, cfg.ServiceNATS.Consumers)
+_ = configurator.CreateOrUpdateObjectStores(ctx, js, cfg.ServiceNATS.ObjectStores)
+```
 
 ## 5. Communication Patterns
 
@@ -175,6 +206,12 @@ This is the most common pattern, used for services that perform work that must b
 -   **Streams and Consumers:** These services use JetStream **streams** to persist messages and **durable consumers** to read from them. A durable consumer remembers its position in the stream, so if the service restarts, it can resume processing where it left off.
 -   **Queue Groups:** Consumers are configured as a **queue group**. This means that although there may be multiple instances of a service running (for scalability), only one instance in the group will receive and process a given message. This ensures that each job is processed exactly once by the group.
 -   **Acknowledgements:** Services use manual message acknowledgement (`msg.Ack()`). A message is only acknowledged after it has been successfully processed. If processing fails, the message is not acknowledged, and NATS will redeliver it for another attempt, providing at-least-once delivery semantics.
+
+Implementation checklist for workers:
+- Create durable consumers with `AckExplicitPolicy` and a queue group when horizontally scaling.
+- Use `consumer.Fetch()` or `consumer.Next()` with a context deadline to avoid blocking.
+- Do not Ack on failure; optionally `Nak()` to accelerate redelivery.
+- Use logger library (not std `log`) for structured logs.
 
 ### 5.2. Simple Publish/Subscribe
 
