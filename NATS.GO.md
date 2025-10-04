@@ -31,54 +31,54 @@ This pattern keeps the messaging layer fast and efficient while allowing for the
 
 ### 3.1. `pdf-to-png-service`
 
--   **Input:** Consumes a `PDFCreatedEvent` from the `pdf.created` subject on the `PDF_JOBS` stream.
+-   **Input:** Consumes a `PDFCreatedEvent` from the subject defined in its consumer configuration.
 -   **Action:**
     1.  Extracts the `PDFKey` from the event.
-    2.  Downloads the source PDF from the `PDF_FILES` object store bucket.
+    2.  Downloads the source PDF from the configured object store.
     3.  Converts each page of the PDF into a separate PNG image.
-    4.  Uploads each generated PNG to the `PNG_FILES` object store bucket, receiving a unique key for each one.
--   **Output:** For each successfully created PNG, it publishes a `PNGCreatedEvent` (containing the new `PNGKey`) to the `png.created` subject.
+    4.  Uploads each generated PNG to the configured object store.
+-   **Output:** For each successfully created PNG, it publishes a `PNGCreatedEvent` to the configured subject.
 
 ### 3.2. `png-to-text-service`
 
--   **Input:** Consumes `PNGCreatedEvent` messages from the `png.created` subject on the `PNG_PROCESSING` stream.
+-   **Input:** Consumes `PNGCreatedEvent` messages from the subject defined in its consumer configuration.
 -   **Action:**
     1.  Extracts the `PNGKey` from the event.
-    2.  Downloads the corresponding PNG image from the `PNG_FILES` object store.
+    2.  Downloads the corresponding PNG image from the configured object store.
     3.  Performs Optical Character Recognition (OCR) on the image to extract text.
     4.  Optionally augments the text with AI-generated commentary.
-    5.  Uploads the resulting text to the `TEXT_FILES` object store, receiving a unique `TextKey`.
--   **Output:** Publishes a `TextProcessedEvent` (containing the `TextKey` and original page metadata) to the `text.processed` subject.
+    5.  Uploads the resulting text to the configured object store.
+-   **Output:** Publishes a `TextProcessedEvent` to the configured subject.
 
 ### 3.3. `tts-service`
 
--   **Input:** Consumes `TextProcessedEvent` messages from the `text.processed` subject.
+-   **Input:** Consumes `TextProcessedEvent` messages from the subject defined in its consumer configuration.
 -   **Action:**
     1.  Extracts the `TextKey` from the event.
-    2.  Downloads the text file from the `TEXT_FILES` object store.
-    3.  Generates a raw PCM audio representation of the text using the `chatllm` binary.
-    4.  Uploads the final audio segment to the `AUDIO_FILES` object store, receiving a unique `AudioKey`.
--   **Output:** Publishes an `AudioChunkCreatedEvent` (containing the `AudioKey`) to the `audio.chunk.created` subject.
+    2.  Downloads the text file from the configured object store.
+    3.  Generates a raw PCM audio representation of the text.
+    4.  Uploads the final audio segment to the configured object store.
+-   **Output:** Publishes an `AudioChunkCreatedEvent` to the configured subject.
 
 ### 3.4. `pcm-to-wav-service`
 
--   **Input:** Consumes `AudioChunkCreatedEvent` messages from the `audio.chunk.created` subject on the `AUDIO_PROCESSING` stream.
+-   **Input:** Consumes `AudioChunkCreatedEvent` messages from the subject defined in its consumer configuration.
 -   **Action:**
     1.  Extracts the `AudioKey` from the event.
-    2.  Downloads the PCM audio file from the `AUDIO_FILES` object store.
-    3.  Converts the PCM file to a WAV file using `sox`.
-    4.  Uploads the final WAV file to the `WAV_FILES` object store, receiving a unique `WavKey`.
--   **Output:** Publishes a `WavFileCreatedEvent` (containing the `WavKey`) to the `wav.created` subject.
+    2.  Downloads the PCM audio file from the configured object store.
+    3.  Converts the PCM file to a WAV file.
+    4.  Uploads the final WAV file to the configured object store.
+-   **Output:** Publishes a `WavFileCreatedEvent` to the configured subject.
 
 ### 3.5. `wav-aggregator-service`
 
--   **Input:** Consumes `WavFileCreatedEvent` messages from the `wav.created` subject.
+-   **Input:** Consumes `WavFileCreatedEvent` messages from the subject defined in its consumer configuration.
 -   **Action:**
     1.  Persists workflow state in a NATS Key-Value store.
-    2.  When all WAV files for a workflow are received, it downloads them from the `WAV_FILES` object store.
-    3.  Combines them into a single WAV file using `sox`.
-    4.  Uploads the final WAV file to the `FINAL_AUDIO_FILES` object store.
--   **Output:** Publishes a `FinalAudioCreatedEvent` (containing the `FinalAudioKey`) to the `final.audio.created` subject.
+    2.  When all WAV files for a workflow are received, it downloads them from the configured object store.
+    3.  Combines them into a single WAV file.
+    4.  Uploads the final WAV file to the configured object store.
+-   **Output:** Publishes a `FinalAudioCreatedEvent` to the configured subject.
 ## 4. Configuration & Event Reference
 
 ### 4.1. Event Payloads (`events` package)
@@ -94,57 +94,75 @@ All events share a common `EventHeader`. The key data fields for each event are:
 
 ### 4.2. Configuration (`project.toml`)
 
-The central `project.toml` file defines all NATS-related configuration under the `[nats]` section. This is the single source of truth for all stream, subject, and bucket names.
+The central `project.toml` file defines all NATS-related configuration. Each service has its own `[<service-name>.nats]` table that follows the unified configuration model.
 
 ```toml
 [nats]
 url = "nats://127.0.0.1:4222"
 
-# PDF Processing
-pdf_stream_name = "PDF_JOBS"
-pdf_consumer_name = "pdf-workers"
-pdf_created_subject = "pdf.created"
-pdf_object_store_bucket = "PDF_FILES"
+[pdf-to-png-service.nats]
+streams = [
+  { name = "pdfs", subjects = ["book-expert.pdfs.created"] },
+  { name = "pngs", subjects = ["book-expert.pngs.created"] }
+]
+consumers = [
+  { stream_name = "pdfs", consumer_name = "pdf-to-png-consumer", filter_subject = "book-expert.pdfs.created" }
+]
+object_stores = [
+  { bucket_name = "pdf-files" },
+  { bucket_name = "png-files" }
+]
 
-# PNG Processing
-png_stream_name = "PNG_PROCESSING"
-png_consumer_name = "png-text-workers"
-png_created_subject = "png.created"
-png_object_store_bucket = "PNG_FILES"
+[png-to-text-service.nats]
+streams = [
+  { name = "texts", subjects = ["book-expert.texts.created"] }
+]
+consumers = [
+  { stream_name = "pngs", consumer_name = "png-to-text-consumer", filter_subject = "book-expert.pngs.created" }
+]
+object_stores = [
+  { bucket_name = "png-files" },
+  { bucket_name = "text-files" }
+]
 
-# PNG to Text Service
-png_stream_name = "PNG_PROCESSING"
-png_consumer_name = "png-text-workers"
-png_created_subject = "png.created"
-png_object_store_bucket = "PNG_FILES"
-text_object_store_bucket = "TEXT_FILES"
-dead_letter_subject = "dead.letter"
-text_stream_name = "TTS_JOBS"
-
-# Text to Speech Service
-tts_consumer_name = "tts-workers"
-text_processed_subject = "text.processed"
-audio_chunk_created_subject = "audio.chunk.created"
-audio_object_store_bucket = "AUDIO_FILES"
-
-# PCM to WAV Service
-audio_processing_stream_name = "AUDIO_PROCESSING"
-audio_processing_consumer_name = "pcm-to-wav-workers"
-wav_created_subject = "wav.created"
-wav_object_store_bucket = "WAV_FILES"
-
-# WAV Aggregator Service
-wav_consumer_name = "wav-aggregator-workers"
-final_audio_created_subject = "final.audio.created"
-final_audio_object_store_bucket = "FINAL_AUDIO_FILES"
-wav_aggregator_kv_bucket = "WAV_AGGREGATOR_STATE"
-
+# ... and so on for the other services
 ```
 
-```toml
-[wav_aggregator_service]
-worker_pool_size = 10
+### 4.3. Unified Configuration Model (`configurator` package)
+
+To ensure consistency and simplify NATS configuration, the project now uses a unified configuration model provided by the `configurator` package. This package defines a set of standardized structs that are used by all services to configure their NATS resources.
+
+**Go Structs:**
+
+```go
+// package configurator
+
+// ServiceNATSConfig is a container for all NATS-related configuration for a service.
+type ServiceNATSConfig struct {
+	NATS         NATSConfig          `toml:"nats"`
+	Streams      []StreamConfig      `toml:"streams"`
+	Consumers    []ConsumerConfig    `toml:"consumers"`
+	ObjectStores []ObjectStoreConfig `toml:"object_stores"`
+	KeyValue     *KeyValueConfig     `toml:"key_value"`
+}
+
+// NATSConfig represents the NATS configuration for a service.
+type NATSConfig struct {
+	URL string `toml:"url"`
+}
+
+// StreamConfig defines the configuration for a JetStream stream.
+type StreamConfig struct {
+	Name     string   `toml:"name"`
+	Subjects []string `toml:"subjects"`
+}
+
+// ... and so on for ConsumerConfig, ObjectStoreConfig, and KeyValueConfig
 ```
+
+**Usage:**
+
+Each service loads its NATS configuration into the `configurator.ServiceNATSConfig` struct. The `configurator` package also provides a set of helper functions to simplify the setup of NATS components, such as creating streams, consumers, and object stores.
 
 ## 5. Communication Patterns
 
